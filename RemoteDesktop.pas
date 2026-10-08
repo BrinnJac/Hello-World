@@ -46,7 +46,9 @@ type
     ScaleFactor: Double;
     // Last received screenshot, at the remote screen's full resolution.
     FFrame: TBitmap;
-    // Where the screenshot is drawn inside imgDesktop (keeps aspect, centered)
+    // Size of the remote screenshot in pixels (0 x 0 when there is none yet)
+    function SourceSize: TSize;
+    // Where the screenshot is drawn inside imgDesktop
     function FrameRect: TRect;
     // Draws FFrame into imgDesktop, scaled to fill the whole control
     procedure RenderFrame;
@@ -75,11 +77,31 @@ begin
   inherited;
 end;
 
+type
+  // Gives access to TImage's protected DestRect (where TImage itself draws)
+  TImageAccess = class(TImage);
+
+// -----------------------------------------------------------------------------
+// SIZE OF THE REMOTE SCREENSHOT
+// -----------------------------------------------------------------------------
+// Frames that came in through ShowScreen are kept in FFrame. A frame that was
+// put straight into imgDesktop.Picture (without ShowScreen) is still handled,
+// so mouse control works either way.
+function TForm1.SourceSize: TSize;
+begin
+  if (FFrame <> nil) and not FFrame.Empty then
+    Result := TSize.Create(FFrame.Width, FFrame.Height)
+  else
+    Result := TSize.Create(imgDesktop.Picture.Width, imgDesktop.Picture.Height);
+end;
+
 // -----------------------------------------------------------------------------
 // WHERE THE SCREENSHOT SITS INSIDE imgDesktop
 // -----------------------------------------------------------------------------
-// Largest rectangle with the remote screen's aspect ratio that fits in
-// imgDesktop, centered. Empty when there is no screenshot yet.
+// For frames from ShowScreen: the largest rectangle with the remote screen's
+// aspect ratio that fits in imgDesktop, centered - exactly where RenderFrame
+// draws it. Otherwise: wherever TImage draws its picture. Empty when there is
+// no screenshot yet.
 function TForm1.FrameRect: TRect;
 var
   Scale: Double;
@@ -87,9 +109,14 @@ var
   DrawHeight: Integer;
 begin
   Result := Rect(0, 0, 0, 0);
-  if (FFrame = nil) or (FFrame.Width < 1) or (FFrame.Height < 1) or
-    (imgDesktop.ClientWidth < 1) or (imgDesktop.ClientHeight < 1) then
+  if (imgDesktop.ClientWidth < 1) or (imgDesktop.ClientHeight < 1) then
     Exit;
+  if (FFrame = nil) or FFrame.Empty then
+  begin
+    if (imgDesktop.Picture.Width > 0) and (imgDesktop.Picture.Height > 0) then
+      Result := TImageAccess(imgDesktop).DestRect;
+    Exit;
+  end;
 
   Scale := Min(imgDesktop.ClientWidth / FFrame.Width,
     imgDesktop.ClientHeight / FFrame.Height);
@@ -110,21 +137,25 @@ function TForm1.RemotePoint(X, Y: Integer; ClampToEdge: Boolean;
   out RemoteX, RemoteY: Integer): Boolean;
 var
   R: TRect;
+  Size: TSize;
 begin
   Result := False;
   RemoteX := 0;
   RemoteY := 0;
   R := FrameRect;
-  if R.IsEmpty then
+  Size := SourceSize;
+  if R.IsEmpty or (Size.cx < 1) or (Size.cy < 1) then
     Exit;
   if not ClampToEdge and not R.Contains(Point(X, Y)) then
     Exit;
 
+  // Uses the centre of the clicked pixel, so the click lands on the remote
+  // pixel under the mouse whether the picture is shrunk or enlarged.
   // ClampToEdge: a point outside the picture becomes the nearest screen edge.
-  RemoteX := Round((X - R.Left) * FFrame.Width / R.Width);
-  RemoteY := Round((Y - R.Top) * FFrame.Height / R.Height);
-  RemoteX := Max(0, Min(FFrame.Width - 1, RemoteX));
-  RemoteY := Max(0, Min(FFrame.Height - 1, RemoteY));
+  RemoteX := Floor((X - R.Left + 0.5) * Size.cx / R.Width);
+  RemoteY := Floor((Y - R.Top + 0.5) * Size.cy / R.Height);
+  RemoteX := Max(0, Min(Size.cx - 1, RemoteX));
+  RemoteY := Max(0, Min(Size.cy - 1, RemoteY));
   Result := True;
 end;
 
@@ -180,7 +211,7 @@ end;
 procedure TForm1.SendImageDimensions;
 begin
   // Send the current image dimensions to the client
-  if (FFrame <> nil) and (FFrame.Width > 0) then
+  if SourceSize.cx > 0 then
   begin
     form2.SendToSingleClient(ClientID,
       bytesof('SetImageDimensions|' + IntToStr(imgDesktop.Width) + '|' +
@@ -257,6 +288,8 @@ var
   Buffer: TBitmap;
   R: TRect;
 begin
+  if (FFrame = nil) or FFrame.Empty then
+    Exit;
   R := FrameRect;
   if R.IsEmpty then
     Exit;
